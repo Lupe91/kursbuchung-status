@@ -39,7 +39,6 @@
     background:var(--ok-bg); color:var(--ok);
   }
   .status.skipped{ background:var(--skip-bg); color:var(--accent); }
-  .status.small{ font-size:.95rem; padding:12px 16px; font-weight:500; }
   button{
     width:100%; padding:18px; border-radius:14px; border:none;
     font-size:1.15rem; font-weight:700; cursor:pointer; margin-bottom:14px;
@@ -60,10 +59,12 @@
   }
   .manual-row.pending{ background:var(--card); border:1.5px dashed var(--border); }
   .manual-row.failed{ background:var(--skip-bg); }
+  .manual-row.done{ background:var(--ok-bg); }
   .manual-info{ flex:1; min-width:0; }
   .manual-course{ font-weight:700; font-size:1rem; }
   .manual-state{ color:var(--muted); font-size:.85rem; margin-top:2px; }
   .manual-row.failed .manual-state{ color:var(--accent); }
+  .manual-row.done .manual-state{ color:var(--ok); }
   .manual-btn{
     width:auto; margin:0; padding:12px 16px; border-radius:11px;
     font-size:.92rem; font-weight:700; background:var(--accent); color:var(--accent-text);
@@ -76,7 +77,6 @@
   <p class="sub">Ein Tipp genügt – dann wird für diesen Dienstag nichts gebucht.</p>
 
   <div class="target" id="targetBox">Lade Termin …</div>
-  <div class="status" id="bookingBox" style="display:none;"></div>
   <div class="status" id="statusBox">Status wird geladen …</div>
 
   <button id="btnSkip">Diesen Dienstag NICHT buchen</button>
@@ -85,20 +85,20 @@
   <div class="msg" id="msg"></div>
 
   <hr class="divider">
-  <p class="section-title">Jetzt manuell anmelden</p>
-  <p class="section-sub">Statt bis Samstag 09:31 zu warten: hier direkt für diesen Dienstag anmelden. Wird von einem Mac-Task geprüft, das kann bis zu einer Stunde dauern.</p>
+  <p class="section-title">Anmeldestatus – wo ist Mama angemeldet?</p>
+  <p class="section-sub">Zeigt pro Kurs, ob für den kommenden Dienstag schon eine Anmeldung vorliegt – egal ob automatisch am Samstag gebucht oder manuell per Button hier.</p>
 
   <div class="manual-row" id="rowWSG">
     <div class="manual-info">
       <div class="manual-course">WSG</div>
-      <div class="manual-state" id="stateWSG">Noch nicht angefragt</div>
+      <div class="manual-state" id="stateWSG">Noch nicht angemeldet</div>
     </div>
     <button class="manual-btn" id="btnManualWSG">Anmelden</button>
   </div>
   <div class="manual-row" id="rowStretch">
     <div class="manual-info">
       <div class="manual-course">Stretch</div>
-      <div class="manual-state" id="stateStretch">Noch nicht angefragt</div>
+      <div class="manual-state" id="stateStretch">Noch nicht angemeldet</div>
     </div>
     <button class="manual-btn" id="btnManualStretch">Anmelden</button>
   </div>
@@ -147,7 +147,6 @@ const targetIso = isoDate(target);
 document.getElementById("targetBox").textContent = germanDate(target);
 
 const statusBox = document.getElementById("statusBox");
-const bookingBox = document.getElementById("bookingBox");
 const btnSkip = document.getElementById("btnSkip");
 const btnUndo = document.getElementById("btnUndo");
 const msg = document.getElementById("msg");
@@ -177,29 +176,6 @@ function renderStatus(skippedDate){
   }
 }
 
-// Shows whether the Tuesday course booking already ran and how it went.
-// Only relevant for the upcoming target Tuesday; older entries are ignored.
-function renderBooking(lastBooking){
-  if (!lastBooking || lastBooking.date !== targetIso){
-    bookingBox.style.display = "none";
-    return;
-  }
-  bookingBox.style.display = "block";
-  bookingBox.className = "status small";
-  if (lastBooking.status === "booked"){
-    const courses = Array.isArray(lastBooking.courses) && lastBooking.courses.length
-      ? " (" + lastBooking.courses.join(" & ") + ")" : "";
-    bookingBox.textContent = "✓ Mama ist angemeldet" + courses;
-  } else if (lastBooking.status === "skipped"){
-    bookingBox.textContent = "Wie gewünscht nicht gebucht";
-  } else if (lastBooking.status === "failed"){
-    bookingBox.textContent = "⚠ Buchung fehlgeschlagen – bitte bei Dominic melden";
-    bookingBox.className = "status skipped small";
-  } else {
-    bookingBox.style.display = "none";
-  }
-}
-
 const MANUAL_COURSES = ["WSG", "Stretch"];
 const manualBtns = { WSG: document.getElementById("btnManualWSG"), Stretch: document.getElementById("btnManualStretch") };
 const manualStates = { WSG: document.getElementById("stateWSG"), Stretch: document.getElementById("stateStretch") };
@@ -207,21 +183,44 @@ const manualRows = { WSG: document.getElementById("rowWSG"), Stretch: document.g
 const manualMsg = document.getElementById("manualMsg");
 let lastManualRequests = {};
 
-// Shows, per course, whether a manual "book now" request is pending / done / failed
-// for the upcoming target Tuesday. Requests for other dates are ignored (stale).
-function renderManual(manualRequests){
+// Combines two sources into one always-visible per-course status:
+// 1) the automatic Saturday booking run (lastBooking), and
+// 2) a manual "Jetzt anmelden" request (manualRequests).
+// Whichever confirms a registration for the upcoming Tuesday wins.
+function renderCourseStatus(manualRequests, lastBooking){
   lastManualRequests = manualRequests || {};
+
+  const bookingForTarget = lastBooking && lastBooking.date === targetIso ? lastBooking : null;
+  const autoBookedCourses = bookingForTarget && bookingForTarget.status === "booked" && Array.isArray(bookingForTarget.courses)
+    ? bookingForTarget.courses : [];
+  const autoFailed = !!(bookingForTarget && bookingForTarget.status === "failed");
+
   MANUAL_COURSES.forEach(course => {
     const row = manualRows[course], stateEl = manualStates[course], btn = manualBtns[course];
-    const req = manualRequests && manualRequests[course];
-    const relevant = req && req.date === targetIso ? req : null;
-
     row.className = "manual-row";
     btn.disabled = false;
     btn.textContent = "Anmelden";
 
+    // 1) Automatische Samstags-Buchung hat diesen Kurs bereits gebucht.
+    if (autoBookedCourses.includes(course)){
+      row.className = "manual-row done";
+      stateEl.textContent = "✓ Angemeldet (automatisch am Samstag gebucht)";
+      btn.disabled = true;
+      btn.textContent = "Angemeldet";
+      return;
+    }
+
+    // 2) Sonst zählt der Stand der manuellen Anfrage für diesen Kurs.
+    const req = manualRequests && manualRequests[course];
+    const relevant = req && req.date === targetIso ? req : null;
+
     if (!relevant){
-      stateEl.textContent = "Noch nicht angefragt";
+      if (autoFailed){
+        row.className = "manual-row failed";
+        stateEl.textContent = "⚠ Automatische Buchung fehlgeschlagen – hier manuell anmelden";
+      } else {
+        stateEl.textContent = "Noch nicht angemeldet";
+      }
       return;
     }
     if (relevant.status === "pending"){
@@ -230,6 +229,7 @@ function renderManual(manualRequests){
       btn.disabled = true;
       btn.textContent = "Angefragt …";
     } else if (relevant.status === "booked" || relevant.status === "already"){
+      row.className = "manual-row done";
       stateEl.textContent = "✓ Angemeldet";
       btn.disabled = true;
       btn.textContent = "Angemeldet";
@@ -240,7 +240,7 @@ function renderManual(manualRequests){
       row.className = "manual-row failed";
       stateEl.textContent = "⚠ Fehlgeschlagen – erneut versuchen oder Dominic fragen";
     } else {
-      stateEl.textContent = "Noch nicht angefragt";
+      stateEl.textContent = "Noch nicht angemeldet";
     }
   });
 }
@@ -262,10 +262,10 @@ async function requestManual(course){
     manualMsg.textContent = "Angefragt – wird bald geprüft.";
     // Render optimistically instead of re-fetching RAW_URL: the raw.githubusercontent.com
     // CDN can keep serving the pre-write response for this same cache-busted URL for a
-    // short while, which would otherwise show "Noch nicht angefragt" right after a click.
+    // short while, which would otherwise show "Noch nicht angemeldet" right after a click.
     const next = { ...lastManualRequests };
     next[course] = { date: targetIso, status: "pending", requestedAt: new Date().toISOString() };
-    renderManual(next);
+    renderCourseStatus(next, null);
   } catch(e){
     manualMsg.className = "msg err";
     manualMsg.textContent = "Fehler: " + e.message + " — bitte Dominic Bescheid geben.";
@@ -279,15 +279,13 @@ manualBtns.Stretch.addEventListener("click", () => requestManual("Stretch"));
 async function loadStatus(){
   try{
     const res = await fetch(RAW_URL, { cache: "no-store" });
-    if (!res.ok){ renderStatus(null); renderBooking(null); renderManual(null); return; }
+    if (!res.ok){ renderStatus(null); renderCourseStatus(null, null); return; }
     const data = await res.json();
     renderStatus(extractSkipDate(data));
-    renderBooking(data && data.lastBooking ? data.lastBooking : null);
-    renderManual(data && data.manualRequests ? data.manualRequests : null);
+    renderCourseStatus(data && data.manualRequests ? data.manualRequests : null, data && data.lastBooking ? data.lastBooking : null);
   } catch(e){
     renderStatus(null);
-    renderBooking(null);
-    renderManual(null);
+    renderCourseStatus(null, null);
   }
 }
 
