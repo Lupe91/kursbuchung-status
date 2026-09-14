@@ -51,6 +51,24 @@
   .hint{ color:var(--muted); font-size:.9rem; text-align:center; margin-top:6px; }
   .msg{ text-align:center; font-size:.95rem; min-height:1.2em; margin-top:10px; }
   .msg.err{ color:var(--accent); }
+  .divider{ border:none; border-top:1px solid var(--border); margin:22px 0 18px; }
+  .section-title{ font-size:1rem; font-weight:700; margin:0 0 4px; }
+  .section-sub{ color:var(--muted); font-size:.88rem; margin:0 0 14px; }
+  .manual-row{
+    display:flex; align-items:center; gap:10px; margin-bottom:12px;
+    background:var(--ok-bg); border-radius:14px; padding:10px 10px 10px 16px;
+  }
+  .manual-row.pending{ background:var(--card); border:1.5px dashed var(--border); }
+  .manual-row.failed{ background:var(--skip-bg); }
+  .manual-info{ flex:1; min-width:0; }
+  .manual-course{ font-weight:700; font-size:1rem; }
+  .manual-state{ color:var(--muted); font-size:.85rem; margin-top:2px; }
+  .manual-row.failed .manual-state{ color:var(--accent); }
+  .manual-btn{
+    width:auto; margin:0; padding:12px 16px; border-radius:11px;
+    font-size:.92rem; font-weight:700; background:var(--accent); color:var(--accent-text);
+    white-space:nowrap;
+  }
 </style>
 
 <div class="card">
@@ -65,6 +83,27 @@
   <button id="btnUndo">Doch buchen (Absage zurücknehmen)</button>
 
   <div class="msg" id="msg"></div>
+
+  <hr class="divider">
+  <p class="section-title">Jetzt manuell anmelden</p>
+  <p class="section-sub">Statt bis Samstag 09:31 zu warten: hier direkt für diesen Dienstag anmelden. Wird von einem Mac-Task geprüft, das kann bis zu einer Stunde dauern.</p>
+
+  <div class="manual-row" id="rowWSG">
+    <div class="manual-info">
+      <div class="manual-course">WSG</div>
+      <div class="manual-state" id="stateWSG">Noch nicht angefragt</div>
+    </div>
+    <button class="manual-btn" id="btnManualWSG">Anmelden</button>
+  </div>
+  <div class="manual-row" id="rowStretch">
+    <div class="manual-info">
+      <div class="manual-course">Stretch</div>
+      <div class="manual-state" id="stateStretch">Noch nicht angefragt</div>
+    </div>
+    <button class="manual-btn" id="btnManualStretch">Anmelden</button>
+  </div>
+  <div class="msg" id="manualMsg"></div>
+
   <p class="hint">Diese Seite kannst du dir als Lesezeichen auf dem Homescreen speichern.</p>
 </div>
 
@@ -161,16 +200,94 @@ function renderBooking(lastBooking){
   }
 }
 
+const MANUAL_COURSES = ["WSG", "Stretch"];
+const manualBtns = { WSG: document.getElementById("btnManualWSG"), Stretch: document.getElementById("btnManualStretch") };
+const manualStates = { WSG: document.getElementById("stateWSG"), Stretch: document.getElementById("stateStretch") };
+const manualRows = { WSG: document.getElementById("rowWSG"), Stretch: document.getElementById("rowStretch") };
+const manualMsg = document.getElementById("manualMsg");
+let lastManualRequests = {};
+
+// Shows, per course, whether a manual "book now" request is pending / done / failed
+// for the upcoming target Tuesday. Requests for other dates are ignored (stale).
+function renderManual(manualRequests){
+  lastManualRequests = manualRequests || {};
+  MANUAL_COURSES.forEach(course => {
+    const row = manualRows[course], stateEl = manualStates[course], btn = manualBtns[course];
+    const req = manualRequests && manualRequests[course];
+    const relevant = req && req.date === targetIso ? req : null;
+
+    row.className = "manual-row";
+    btn.disabled = false;
+    btn.textContent = "Anmelden";
+
+    if (!relevant){
+      stateEl.textContent = "Noch nicht angefragt";
+      return;
+    }
+    if (relevant.status === "pending"){
+      row.className = "manual-row pending";
+      stateEl.textContent = "Angefragt – wird bald geprüft (bis zu 1 Std.)";
+      btn.disabled = true;
+      btn.textContent = "Angefragt …";
+    } else if (relevant.status === "booked" || relevant.status === "already"){
+      stateEl.textContent = "✓ Angemeldet";
+      btn.disabled = true;
+      btn.textContent = "Angemeldet";
+    } else if (relevant.status === "expired"){
+      row.className = "manual-row failed";
+      stateEl.textContent = "Termin verpasst – bitte erneut anfragen";
+    } else if (relevant.status === "failed"){
+      row.className = "manual-row failed";
+      stateEl.textContent = "⚠ Fehlgeschlagen – erneut versuchen oder Dominic fragen";
+    } else {
+      stateEl.textContent = "Noch nicht angefragt";
+    }
+  });
+}
+
+async function requestManual(course){
+  MANUAL_COURSES.forEach(c => { manualBtns[c].disabled = true; });
+  manualMsg.className = "msg";
+  manualMsg.textContent = "Wird angefragt …";
+  try{
+    const res = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "manualRequest", course, date: targetIso })
+    });
+    if (!res.ok){
+      const t = await res.text();
+      throw new Error("Fehler " + res.status + ": " + t.slice(0,200));
+    }
+    manualMsg.textContent = "Angefragt – wird bald geprüft.";
+    // Render optimistically instead of re-fetching RAW_URL: the raw.githubusercontent.com
+    // CDN can keep serving the pre-write response for this same cache-busted URL for a
+    // short while, which would otherwise show "Noch nicht angefragt" right after a click.
+    const next = { ...lastManualRequests };
+    next[course] = { date: targetIso, status: "pending", requestedAt: new Date().toISOString() };
+    renderManual(next);
+  } catch(e){
+    manualMsg.className = "msg err";
+    manualMsg.textContent = "Fehler: " + e.message + " — bitte Dominic Bescheid geben.";
+    MANUAL_COURSES.forEach(c => { manualBtns[c].disabled = false; });
+  }
+}
+
+manualBtns.WSG.addEventListener("click", () => requestManual("WSG"));
+manualBtns.Stretch.addEventListener("click", () => requestManual("Stretch"));
+
 async function loadStatus(){
   try{
     const res = await fetch(RAW_URL, { cache: "no-store" });
-    if (!res.ok){ renderStatus(null); renderBooking(null); return; }
+    if (!res.ok){ renderStatus(null); renderBooking(null); renderManual(null); return; }
     const data = await res.json();
     renderStatus(extractSkipDate(data));
     renderBooking(data && data.lastBooking ? data.lastBooking : null);
+    renderManual(data && data.manualRequests ? data.manualRequests : null);
   } catch(e){
     renderStatus(null);
     renderBooking(null);
+    renderManual(null);
   }
 }
 
