@@ -19,8 +19,8 @@
     },
     "WSG": {
       "date": "2026-09-15",
-      "status": "pending",
-      "requestedAt": "2026-09-14T21:11:40.934Z"
+      "status": "already",
+      "checkedAt": "2026-09-14T21:24:01.939Z"
     }
   }
 }
