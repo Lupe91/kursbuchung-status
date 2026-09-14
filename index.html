@@ -123,14 +123,13 @@ function berlinNow(){
   return new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Berlin" }));
 }
 
-// Next Saturday's date (today counts), then +3 days = the Tuesday that
-// Saturday's 09:31 run would book. Mirrors the booking script's own logic.
+// The next upcoming Tuesday, today counted if today already is Tuesday.
+// Mirrors the live-status-check task's own date logic.
 function targetTuesday(){
   const now = berlinNow();
-  const day = now.getDay(); // 0=Sun .. 6=Sat
-  const daysToSat = (6 - day + 7) % 7;
-  const sat = new Date(now); sat.setDate(now.getDate() + daysToSat);
-  const tue = new Date(sat); tue.setDate(sat.getDate() + 3);
+  const day = now.getDay(); // 0=Sun .. 6=Sat, Tuesday=2
+  const daysToTue = (2 - day + 7) % 7;
+  const tue = new Date(now); tue.setDate(now.getDate() + daysToTue);
   return tue;
 }
 
