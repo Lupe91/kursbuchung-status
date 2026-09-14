@@ -1,0 +1,203 @@
+<title>Kurs absagen</title>
+<style>
+  :root{
+    --bg:#faf8f5; --card:#ffffff; --text:#2b2420; --muted:#7a7168;
+    --accent:#c96a4f; --accent-text:#ffffff; --ok:#3f7a53; --ok-bg:#eaf3ec;
+    --skip-bg:#fbeee9; --border:#e8e1d9;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#1c1a18; --card:#26231f; --text:#f2ece4; --muted:#a99f92;
+      --accent:#e08064; --accent-text:#1c1a18; --ok:#7fc999; --ok-bg:#20302a;
+      --skip-bg:#3a2620; --border:#3a352f;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#1c1a18; --card:#26231f; --text:#f2ece4; --muted:#a99f92;
+    --accent:#e08064; --accent-text:#1c1a18; --ok:#7fc999; --ok-bg:#20302a;
+    --skip-bg:#3a2620; --border:#3a352f;
+  }
+  *{box-sizing:border-box;}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    padding:24px 16px 48px; margin:0; min-height:100vh;
+  }
+  .card{
+    max-width:480px; margin:0 auto; background:var(--card);
+    border:1px solid var(--border); border-radius:20px; padding:28px 22px;
+  }
+  h1{font-size:1.5rem; margin:0 0 6px; line-height:1.25;}
+  .sub{color:var(--muted); font-size:1.05rem; margin:0 0 22px;}
+  .target{
+    background:var(--ok-bg); border-radius:14px; padding:16px 18px;
+    font-size:1.15rem; font-weight:600; margin-bottom:14px; text-align:center;
+  }
+  .status{
+    border-radius:14px; padding:16px 18px; margin-bottom:14px;
+    font-size:1.1rem; text-align:center; font-weight:600;
+    background:var(--ok-bg); color:var(--ok);
+  }
+  .status.skipped{ background:var(--skip-bg); color:var(--accent); }
+  .status.small{ font-size:.95rem; padding:12px 16px; font-weight:500; }
+  button{
+    width:100%; padding:18px; border-radius:14px; border:none;
+    font-size:1.15rem; font-weight:700; cursor:pointer; margin-bottom:14px;
+    -webkit-tap-highlight-color:transparent;
+  }
+  #btnSkip{ background:var(--accent); color:var(--accent-text); }
+  #btnUndo{ background:transparent; color:var(--muted); border:1.5px solid var(--border); }
+  button:disabled{ opacity:.5; cursor:default; }
+  .hint{ color:var(--muted); font-size:.9rem; text-align:center; margin-top:6px; }
+  .msg{ text-align:center; font-size:.95rem; min-height:1.2em; margin-top:10px; }
+  .msg.err{ color:var(--accent); }
+</style>
+
+<div class="card">
+  <h1>WSG &amp; Stretch am Dienstag</h1>
+  <p class="sub">Ein Tipp genügt – dann wird für diesen Dienstag nichts gebucht.</p>
+
+  <div class="target" id="targetBox">Lade Termin …</div>
+  <div class="status" id="bookingBox" style="display:none;"></div>
+  <div class="status" id="statusBox">Status wird geladen …</div>
+
+  <button id="btnSkip">Diesen Dienstag NICHT buchen</button>
+  <button id="btnUndo">Doch buchen (Absage zurücknehmen)</button>
+
+  <div class="msg" id="msg"></div>
+  <p class="hint">Diese Seite kannst du dir als Lesezeichen auf dem Homescreen speichern.</p>
+</div>
+
+<script>
+// ---- Einmalig ausfüllen, nachdem der Cloudflare Worker angelegt wurde ----
+const WORKER_URL = "https://kursbuchung-skip.hrbwmfrs6d.workers.dev";
+// ---------------------------------------------------------------------------
+
+const GH_OWNER = "Lupe91";
+const GH_REPO  = "kursbuchung-status";
+const GH_PATH  = "skip.json";
+const GH_BRANCH = "main";
+
+const RAW_URL = `https://raw.githubusercontent.com/${GH_OWNER}/${GH_REPO}/${GH_BRANCH}/${GH_PATH}?t=` + Date.now();
+
+function berlinNow(){
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/Berlin" }));
+}
+
+// Next Saturday's date (today counts), then +3 days = the Tuesday that
+// Saturday's 09:31 run would book. Mirrors the booking script's own logic.
+function targetTuesday(){
+  const now = berlinNow();
+  const day = now.getDay(); // 0=Sun .. 6=Sat
+  const daysToSat = (6 - day + 7) % 7;
+  const sat = new Date(now); sat.setDate(now.getDate() + daysToSat);
+  const tue = new Date(sat); tue.setDate(sat.getDate() + 3);
+  return tue;
+}
+
+function isoDate(d){
+  return d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+}
+
+function germanDate(d){
+  return d.toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+const target = targetTuesday();
+const targetIso = isoDate(target);
+document.getElementById("targetBox").textContent = germanDate(target);
+
+const statusBox = document.getElementById("statusBox");
+const bookingBox = document.getElementById("bookingBox");
+const btnSkip = document.getElementById("btnSkip");
+const btnUndo = document.getElementById("btnUndo");
+const msg = document.getElementById("msg");
+
+function setBusy(b){ btnSkip.disabled = b; btnUndo.disabled = b; }
+function showMsg(t, isErr){ msg.textContent = t || ""; msg.className = "msg" + (isErr ? " err" : ""); }
+
+// Supports both the new {skip:{date}} schema and the older flat {date} schema.
+function extractSkipDate(data){
+  if (!data) return null;
+  if (data.skip && typeof data.skip === "object") return data.skip.date || null;
+  if ("date" in data) return data.date || null;
+  return null;
+}
+
+function renderStatus(skippedDate){
+  if (skippedDate === targetIso){
+    statusBox.textContent = "✓ Dieser Dienstag wird NICHT gebucht";
+    statusBox.className = "status skipped";
+    btnSkip.style.display = "none";
+    btnUndo.style.display = "block";
+  } else {
+    statusBox.textContent = "Kurs wird normal gebucht";
+    statusBox.className = "status";
+    btnSkip.style.display = "block";
+    btnUndo.style.display = "none";
+  }
+}
+
+// Shows whether the Tuesday course booking already ran and how it went.
+// Only relevant for the upcoming target Tuesday; older entries are ignored.
+function renderBooking(lastBooking){
+  if (!lastBooking || lastBooking.date !== targetIso){
+    bookingBox.style.display = "none";
+    return;
+  }
+  bookingBox.style.display = "block";
+  bookingBox.className = "status small";
+  if (lastBooking.status === "booked"){
+    const courses = Array.isArray(lastBooking.courses) && lastBooking.courses.length
+      ? " (" + lastBooking.courses.join(" & ") + ")" : "";
+    bookingBox.textContent = "✓ Mama ist angemeldet" + courses;
+  } else if (lastBooking.status === "skipped"){
+    bookingBox.textContent = "Wie gewünscht nicht gebucht";
+  } else if (lastBooking.status === "failed"){
+    bookingBox.textContent = "⚠ Buchung fehlgeschlagen – bitte bei Dominic melden";
+    bookingBox.className = "status skipped small";
+  } else {
+    bookingBox.style.display = "none";
+  }
+}
+
+async function loadStatus(){
+  try{
+    const res = await fetch(RAW_URL, { cache: "no-store" });
+    if (!res.ok){ renderStatus(null); renderBooking(null); return; }
+    const data = await res.json();
+    renderStatus(extractSkipDate(data));
+    renderBooking(data && data.lastBooking ? data.lastBooking : null);
+  } catch(e){
+    renderStatus(null);
+    renderBooking(null);
+  }
+}
+
+async function writeStatus(dateOrNull){
+  setBusy(true);
+  showMsg("Wird gespeichert …");
+  try{
+    const res = await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "skip", date: dateOrNull })
+    });
+    if (!res.ok){
+      const t = await res.text();
+      throw new Error("Fehler " + res.status + ": " + t.slice(0,200));
+    }
+    renderStatus(dateOrNull);
+    showMsg(dateOrNull ? "Gespeichert – bis Dienstag!" : "Gespeichert – Kurs wird wieder gebucht.");
+  } catch(e){
+    showMsg("Fehler: " + e.message + " — bitte Dominic Bescheid geben.", true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+btnSkip.addEventListener("click", () => writeStatus(targetIso));
+btnUndo.addEventListener("click", () => writeStatus(null));
+
+loadStatus();
+</script>
